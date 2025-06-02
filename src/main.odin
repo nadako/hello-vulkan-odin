@@ -9,6 +9,7 @@ Globals :: struct {
 	odin_context: runtime.Context,
 	window: glfw.WindowHandle,
 	instance: vk.Instance,
+	debug_messenger: vk.DebugUtilsMessengerEXT,
 }
 g: Globals
 
@@ -32,9 +33,7 @@ main :: proc() {
 	log.assert(vk.CreateInstance != nil, "Failed to load Vulkan API")
 
 	create_instance()
-	vk.load_proc_addresses_instance(g.instance)
-	log.assert(vk.DestroyInstance != nil, "Failed to load Vulkan instance API")
-	defer vk.DestroyInstance(g.instance, nil)
+	defer destroy_instance()
 
 	for !glfw.WindowShouldClose(g.window) {
 		free_all(context.temp_allocator)
@@ -43,8 +42,32 @@ main :: proc() {
 }
 
 create_instance :: proc() {
-	layers := []cstring {}
-	extensions := []cstring {}
+	layers := []cstring {
+		"VK_LAYER_KHRONOS_validation"
+	}
+	extensions := []cstring {
+		vk.EXT_DEBUG_UTILS_EXTENSION_NAME,
+	}
+
+	debug_messenger_ci := vk.DebugUtilsMessengerCreateInfoEXT {
+		sType = .DEBUG_UTILS_MESSENGER_CREATE_INFO_EXT,
+		messageSeverity = {.WARNING, .ERROR},
+		messageType = {.VALIDATION, .PERFORMANCE},
+		pfnUserCallback = proc "system" (messageSeverity: vk.DebugUtilsMessageSeverityFlagsEXT, messageTypes: vk.DebugUtilsMessageTypeFlagsEXT, pCallbackData: ^vk.DebugUtilsMessengerCallbackDataEXT, pUserData: rawptr) -> b32 {
+			context = g.odin_context
+			context.logger.options = {.Level, .Terminal_Color}
+			level: log.Level
+			if .ERROR in messageSeverity do level = .Error
+			else if .WARNING in messageSeverity do level = .Warning
+			else if .INFO in messageSeverity do level = .Info
+			else do level = .Debug
+			log.log(level, pCallbackData.pMessage)
+			return false
+		}
+	}
+
+	next: rawptr
+	next = &debug_messenger_ci
 
 	instance_ci := vk.InstanceCreateInfo {
 		sType = .INSTANCE_CREATE_INFO,
@@ -56,8 +79,19 @@ create_instance :: proc() {
 		ppEnabledLayerNames = raw_data(layers),
 		enabledExtensionCount = u32(len(extensions)),
 		ppEnabledExtensionNames = raw_data(extensions),
+		pNext = next,
 	}
 	vk_check(vk.CreateInstance(&instance_ci, nil, &g.instance))
+
+	vk.load_proc_addresses_instance(g.instance)
+	log.assert(vk.DestroyInstance != nil, "Failed to load Vulkan instance API")
+
+	vk_check(vk.CreateDebugUtilsMessengerEXT(g.instance, &debug_messenger_ci, nil, &g.debug_messenger))
+}
+
+destroy_instance :: proc() {
+	vk.DestroyDebugUtilsMessengerEXT(g.instance, g.debug_messenger, nil)
+	vk.DestroyInstance(g.instance, nil)
 }
 
 vk_check :: proc(result: vk.Result, location := #caller_location) {
