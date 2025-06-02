@@ -2,6 +2,7 @@ package main
 
 import "base:runtime"
 import "core:log"
+import "core:slice"
 import "vendor:glfw"
 import vk "vendor:vulkan"
 
@@ -10,6 +11,11 @@ Globals :: struct {
 	window: glfw.WindowHandle,
 	instance: vk.Instance,
 	debug_messenger: vk.DebugUtilsMessengerEXT,
+	surface: vk.SurfaceKHR,
+	physical_device: vk.PhysicalDevice,
+	queue_family_index: u32,
+	device: vk.Device,
+	queue: vk.Queue,
 }
 g: Globals
 
@@ -25,6 +31,7 @@ main :: proc() {
 	if !glfw.Init() do return
 	defer glfw.Terminate()
 
+	glfw.WindowHint(glfw.CLIENT_API, glfw.NO_API)
 	g.window = glfw.CreateWindow(1024, 768, "Hello Vulkan", nil, nil)
 	if g.window == nil do return
 	defer glfw.DestroyWindow(g.window)
@@ -34,6 +41,12 @@ main :: proc() {
 
 	create_instance()
 	defer destroy_instance()
+
+	vk_check(glfw.CreateWindowSurface(g.instance, g.window, nil, &g.surface))
+	defer vk.DestroySurfaceKHR(g.instance, g.surface, nil)
+
+	create_device()
+	defer destroy_device()
 
 	for !glfw.WindowShouldClose(g.window) {
 		free_all(context.temp_allocator)
@@ -45,9 +58,10 @@ create_instance :: proc() {
 	layers := []cstring {
 		"VK_LAYER_KHRONOS_validation"
 	}
-	extensions := []cstring {
-		vk.EXT_DEBUG_UTILS_EXTENSION_NAME,
-	}
+	extensions := slice.concatenate([][]cstring {
+		glfw.GetRequiredInstanceExtensions(),
+		{vk.EXT_DEBUG_UTILS_EXTENSION_NAME},
+	}, context.temp_allocator)
 
 	debug_messenger_ci := vk.DebugUtilsMessengerCreateInfoEXT {
 		sType = .DEBUG_UTILS_MESSENGER_CREATE_INFO_EXT,
@@ -92,6 +106,56 @@ create_instance :: proc() {
 destroy_instance :: proc() {
 	vk.DestroyDebugUtilsMessengerEXT(g.instance, g.debug_messenger, nil)
 	vk.DestroyInstance(g.instance, nil)
+}
+
+create_device :: proc() {
+	physical_device_count: u32
+	vk_check(vk.EnumeratePhysicalDevices(g.instance, &physical_device_count, nil))
+	log.assert(physical_device_count > 0, "No GPUs found!")
+	physical_devices := make([]vk.PhysicalDevice, physical_device_count, context.temp_allocator)
+	vk_check(vk.EnumeratePhysicalDevices(g.instance, &physical_device_count, raw_data(physical_devices)))
+
+	device_loop: for candidate in physical_devices {
+		queue_family_count: u32
+		vk.GetPhysicalDeviceQueueFamilyProperties(candidate, &queue_family_count, nil)
+		queue_families := make([]vk.QueueFamilyProperties, queue_family_count, context.temp_allocator)
+		vk.GetPhysicalDeviceQueueFamilyProperties(candidate, &queue_family_count, raw_data(queue_families))
+
+		for family, i in queue_families {
+			supports_graphics := .GRAPHICS in family.queueFlags
+			supports_present: b32
+			vk_check(vk.GetPhysicalDeviceSurfaceSupportKHR(candidate, u32(i), g.surface, &supports_present))
+
+			if supports_graphics && supports_present {
+				g.physical_device = candidate
+				g.queue_family_index = u32(i)
+				break device_loop
+			}
+		}
+	}
+	log.assert(g.physical_device != nil, "No suitable GPU found!")
+
+	queue_priority := f32(1)
+	queue_create_infos := []vk.DeviceQueueCreateInfo {
+		{
+			sType = .DEVICE_QUEUE_CREATE_INFO,
+			queueFamilyIndex = g.queue_family_index,
+			queueCount = 1,
+			pQueuePriorities = &queue_priority,
+		}
+	}
+	device_ci := vk.DeviceCreateInfo {
+		sType = .DEVICE_CREATE_INFO,
+		queueCreateInfoCount = u32(len(queue_create_infos)),
+		pQueueCreateInfos = raw_data(queue_create_infos),
+	}
+	vk_check(vk.CreateDevice(g.physical_device, &device_ci, nil, &g.device))
+
+	vk.GetDeviceQueue(g.device, g.queue_family_index, 0, &g.queue)
+}
+
+destroy_device :: proc() {
+	vk.DestroyDevice(g.device, nil)
 }
 
 vk_check :: proc(result: vk.Result, location := #caller_location) {
