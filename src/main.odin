@@ -16,6 +16,7 @@ Globals :: struct {
 	queue_family_index: u32,
 	device: vk.Device,
 	queue: vk.Queue,
+	swapchain: vk.SwapchainKHR,
 }
 g: Globals
 
@@ -47,6 +48,9 @@ main :: proc() {
 
 	create_device()
 	defer destroy_device()
+
+	create_swapchain()
+	defer destroy_swapchain()
 
 	for !glfw.WindowShouldClose(g.window) {
 		free_all(context.temp_allocator)
@@ -144,18 +148,71 @@ create_device :: proc() {
 			pQueuePriorities = &queue_priority,
 		}
 	}
+
+	extensions := []cstring {
+		vk.KHR_SWAPCHAIN_EXTENSION_NAME,
+	}
+
 	device_ci := vk.DeviceCreateInfo {
 		sType = .DEVICE_CREATE_INFO,
 		queueCreateInfoCount = u32(len(queue_create_infos)),
 		pQueueCreateInfos = raw_data(queue_create_infos),
+		enabledExtensionCount = u32(len(extensions)),
+		ppEnabledExtensionNames = raw_data(extensions),
 	}
 	vk_check(vk.CreateDevice(g.physical_device, &device_ci, nil, &g.device))
+
+	vk.load_proc_addresses_device(g.device)
+	log.assert(vk.BeginCommandBuffer != nil, "Failed to load Vulkan device API")
 
 	vk.GetDeviceQueue(g.device, g.queue_family_index, 0, &g.queue)
 }
 
 destroy_device :: proc() {
 	vk.DestroyDevice(g.device, nil)
+}
+
+create_swapchain :: proc() {
+	surface_caps: vk.SurfaceCapabilitiesKHR
+	vk_check(vk.GetPhysicalDeviceSurfaceCapabilitiesKHR(g.physical_device, g.surface, &surface_caps))
+
+	image_count: u32 = max(3, surface_caps.minImageCount)
+	if surface_caps.maxImageCount != 0 do image_count = min(image_count, surface_caps.maxImageCount)
+
+	surface_format_count: u32
+	vk_check(vk.GetPhysicalDeviceSurfaceFormatsKHR(g.physical_device, g.surface, &surface_format_count, nil))
+	surface_formats := make([]vk.SurfaceFormatKHR, surface_format_count, context.temp_allocator)
+	vk_check(vk.GetPhysicalDeviceSurfaceFormatsKHR(g.physical_device, g.surface, &surface_format_count, raw_data(surface_formats)))
+
+	surface_format := surface_formats[0]
+	for candidate in surface_formats {
+		if candidate == {.B8G8R8A8_SRGB, .SRGB_NONLINEAR} {
+			surface_format = candidate
+			break
+		}
+	}
+
+	width, height := glfw.GetFramebufferSize(g.window)
+
+	swapchain_ci := vk.SwapchainCreateInfoKHR {
+		sType = .SWAPCHAIN_CREATE_INFO_KHR,
+		surface = g.surface,
+		minImageCount = image_count,
+		imageFormat = surface_format.format,
+		imageColorSpace = surface_format.colorSpace,
+		imageExtent = {u32(width), u32(height)},
+		imageArrayLayers = 1,
+		imageUsage = {.COLOR_ATTACHMENT},
+		preTransform = surface_caps.currentTransform,
+		compositeAlpha = {.OPAQUE},
+		presentMode = .MAILBOX,
+		clipped = true,
+	}
+	vk_check(vk.CreateSwapchainKHR(g.device, &swapchain_ci, nil, &g.swapchain))
+}
+
+destroy_swapchain :: proc() {
+	vk.DestroySwapchainKHR(g.device, g.swapchain, nil)
 }
 
 vk_check :: proc(result: vk.Result, location := #caller_location) {
