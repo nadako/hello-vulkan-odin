@@ -6,6 +6,12 @@ import "core:slice"
 import "vendor:glfw"
 import vk "vendor:vulkan"
 
+Swapchain :: struct {
+	handle: vk.SwapchainKHR,
+	images: []vk.Image,
+	image_ready_semaphores: []vk.Semaphore,
+}
+
 Globals :: struct {
 	odin_context: runtime.Context,
 	window: glfw.WindowHandle,
@@ -16,7 +22,7 @@ Globals :: struct {
 	queue_family_index: u32,
 	device: vk.Device,
 	queue: vk.Queue,
-	swapchain: vk.SwapchainKHR,
+	swapchain: Swapchain,
 }
 g: Globals
 
@@ -52,9 +58,51 @@ main :: proc() {
 	create_swapchain()
 	defer destroy_swapchain()
 
+	acquire_semaphore: vk.Semaphore
+	semaphore_ci := vk.SemaphoreCreateInfo { sType = .SEMAPHORE_CREATE_INFO }
+	vk_check(vk.CreateSemaphore(g.device, &semaphore_ci, nil, &acquire_semaphore))
+
+	frame_fence: vk.Fence
+	fence_ci := vk.FenceCreateInfo {
+		sType = .FENCE_CREATE_INFO,
+		flags = {.SIGNALED}
+	}
+	vk_check(vk.CreateFence(g.device, &fence_ci, nil, &frame_fence))
+
 	for !glfw.WindowShouldClose(g.window) {
 		free_all(context.temp_allocator)
 		glfw.PollEvents()
+
+		vk_check(vk.WaitForFences(g.device, 1, &frame_fence, true, max(u64)))
+		vk_check(vk.ResetFences(g.device, 1, &frame_fence))
+
+		image_index: u32
+		// TODO: handle SUBOPTIMAL_KHR and ERROR_OUT_OF_DATE_KHR
+		vk_check(vk.AcquireNextImageKHR(g.device, g.swapchain.handle, max(u64), acquire_semaphore, 0, &image_index))
+
+		release_semaphore := g.swapchain.image_ready_semaphores[image_index]
+
+		wait_stage_flags := vk.PipelineStageFlags { .COLOR_ATTACHMENT_OUTPUT }
+		submit_info := vk.SubmitInfo {
+			sType = .SUBMIT_INFO,
+			waitSemaphoreCount = 1,
+			pWaitSemaphores = &acquire_semaphore,
+			pWaitDstStageMask = &wait_stage_flags,
+			signalSemaphoreCount = 1,
+			pSignalSemaphores = &release_semaphore,
+		}
+		vk_check(vk.QueueSubmit(g.queue, 1, &submit_info, frame_fence))
+
+		present_info := vk.PresentInfoKHR {
+			sType = .PRESENT_INFO_KHR,
+			waitSemaphoreCount = 1,
+			pWaitSemaphores = &release_semaphore,
+			swapchainCount = 1,
+			pSwapchains = &g.swapchain.handle,
+			pImageIndices = &image_index,
+		}
+		// TODO: handle SUBOPTIMAL_KHR and ERROR_OUT_OF_DATE_KHR
+		vk_check(vk.QueuePresentKHR(g.queue, &present_info))
 	}
 }
 
@@ -192,6 +240,19 @@ create_swapchain :: proc() {
 		}
 	}
 
+	present_mode_count: u32
+	vk_check(vk.GetPhysicalDeviceSurfacePresentModesKHR(g.physical_device, g.surface, &present_mode_count, nil))
+	present_modes := make([]vk.PresentModeKHR, present_mode_count, context.temp_allocator)
+	vk_check(vk.GetPhysicalDeviceSurfacePresentModesKHR(g.physical_device, g.surface, &present_mode_count, raw_data(present_modes)))
+
+	present_mode := vk.PresentModeKHR.FIFO
+	for candidate in present_modes {
+		if candidate == .MAILBOX {
+			present_mode = candidate
+			break
+		}
+	}
+
 	width, height := glfw.GetFramebufferSize(g.window)
 
 	swapchain_ci := vk.SwapchainCreateInfoKHR {
@@ -205,14 +266,28 @@ create_swapchain :: proc() {
 		imageUsage = {.COLOR_ATTACHMENT},
 		preTransform = surface_caps.currentTransform,
 		compositeAlpha = {.OPAQUE},
-		presentMode = .MAILBOX,
+		presentMode = present_mode,
 		clipped = true,
 	}
-	vk_check(vk.CreateSwapchainKHR(g.device, &swapchain_ci, nil, &g.swapchain))
+	vk_check(vk.CreateSwapchainKHR(g.device, &swapchain_ci, nil, &g.swapchain.handle))
+
+	vk_check(vk.GetSwapchainImagesKHR(g.device, g.swapchain.handle, &image_count, nil))
+	g.swapchain.images = make([]vk.Image, image_count, context.allocator)
+	vk_check(vk.GetSwapchainImagesKHR(g.device, g.swapchain.handle, &image_count, raw_data(g.swapchain.images)))
+
+	g.swapchain.image_ready_semaphores = make([]vk.Semaphore, image_count, context.allocator)
+
+	semaphore_ci := vk.SemaphoreCreateInfo { sType = .SEMAPHORE_CREATE_INFO }
+	for &semaphore in g.swapchain.image_ready_semaphores {
+		vk_check(vk.CreateSemaphore(g.device, &semaphore_ci, nil, &semaphore))
+	}
 }
 
 destroy_swapchain :: proc() {
-	vk.DestroySwapchainKHR(g.device, g.swapchain, nil)
+	delete(g.swapchain.images)
+	for semaphore in g.swapchain.image_ready_semaphores do vk.DestroySemaphore(g.device, semaphore, nil)
+	delete(g.swapchain.image_ready_semaphores)
+	vk.DestroySwapchainKHR(g.device, g.swapchain.handle, nil)
 }
 
 vk_check :: proc(result: vk.Result, location := #caller_location) {
