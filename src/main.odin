@@ -8,7 +8,9 @@ import vk "vendor:vulkan"
 
 Swapchain :: struct {
 	handle: vk.SwapchainKHR,
+	width, height: u32,
 	images: []vk.Image,
+	image_views: []vk.ImageView,
 	image_ready_semaphores: []vk.Semaphore,
 }
 
@@ -108,7 +110,31 @@ main :: proc() {
 		}
 		vk_check(vk.BeginCommandBuffer(cmd, &begin_info))
 
-		// record GPU commands
+		color_attachment := vk.RenderingAttachmentInfo {
+			sType = .RENDERING_ATTACHMENT_INFO,
+			imageView = g.swapchain.image_views[image_index],
+			imageLayout = .COLOR_ATTACHMENT_OPTIMAL,
+			loadOp = .CLEAR,
+			storeOp = .STORE,
+			clearValue = {
+				color = { float32 = { 1, 0, 0, 1 } }
+			}
+		}
+		rendering_info := vk.RenderingInfo {
+			sType = .RENDERING_INFO,
+			renderArea = {
+				offset = { 0, 0 },
+				extent = { g.swapchain.width, g.swapchain.height }
+			},
+			layerCount = 1,
+			colorAttachmentCount = 1,
+			pColorAttachments = &color_attachment,
+		}
+		vk.CmdBeginRendering(cmd, &rendering_info)
+
+		// draw stuff
+
+		vk.CmdEndRendering(cmd)
 
 		vk_check(vk.EndCommandBuffer(cmd))
 
@@ -233,8 +259,17 @@ create_device :: proc() {
 		vk.KHR_SWAPCHAIN_EXTENSION_NAME,
 	}
 
+	next: rawptr
+
+	next = &vk.PhysicalDeviceVulkan13Features {
+		sType = .PHYSICAL_DEVICE_VULKAN_1_3_FEATURES,
+		pNext = next,
+		dynamicRendering = true,
+	}
+
 	device_ci := vk.DeviceCreateInfo {
 		sType = .DEVICE_CREATE_INFO,
+		pNext = next,
 		queueCreateInfoCount = u32(len(queue_create_infos)),
 		pQueueCreateInfos = raw_data(queue_create_infos),
 		enabledExtensionCount = u32(len(extensions)),
@@ -286,6 +321,7 @@ create_swapchain :: proc() {
 	}
 
 	width, height := glfw.GetFramebufferSize(g.window)
+	g.swapchain.width, g.swapchain.height = u32(width), u32(height)
 
 	swapchain_ci := vk.SwapchainCreateInfoKHR {
 		sType = .SWAPCHAIN_CREATE_INFO_KHR,
@@ -293,7 +329,7 @@ create_swapchain :: proc() {
 		minImageCount = image_count,
 		imageFormat = surface_format.format,
 		imageColorSpace = surface_format.colorSpace,
-		imageExtent = {u32(width), u32(height)},
+		imageExtent = {g.swapchain.width, g.swapchain.height},
 		imageArrayLayers = 1,
 		imageUsage = {.COLOR_ATTACHMENT},
 		preTransform = surface_caps.currentTransform,
@@ -307,6 +343,22 @@ create_swapchain :: proc() {
 	g.swapchain.images = make([]vk.Image, image_count, context.allocator)
 	vk_check(vk.GetSwapchainImagesKHR(g.device, g.swapchain.handle, &image_count, raw_data(g.swapchain.images)))
 
+	g.swapchain.image_views = make([]vk.ImageView, image_count, context.allocator)
+	for image, i in g.swapchain.images {
+		image_ci := vk.ImageViewCreateInfo {
+			sType = .IMAGE_VIEW_CREATE_INFO,
+			image = image,
+			viewType = .D2,
+			format = surface_format.format,
+			subresourceRange = {
+				aspectMask = {.COLOR},
+				levelCount = 1,
+				layerCount = 1,
+			}
+		}
+		vk_check(vk.CreateImageView(g.device, &image_ci, nil, &g.swapchain.image_views[i]))
+	}
+
 	g.swapchain.image_ready_semaphores = make([]vk.Semaphore, image_count, context.allocator)
 
 	semaphore_ci := vk.SemaphoreCreateInfo { sType = .SEMAPHORE_CREATE_INFO }
@@ -319,6 +371,8 @@ destroy_swapchain :: proc() {
 	delete(g.swapchain.images)
 	for semaphore in g.swapchain.image_ready_semaphores do vk.DestroySemaphore(g.device, semaphore, nil)
 	delete(g.swapchain.image_ready_semaphores)
+	for image_view in g.swapchain.image_views do vk.DestroyImageView(g.device, image_view, nil)
+	delete(g.swapchain.image_views)
 	vk.DestroySwapchainKHR(g.device, g.swapchain.handle, nil)
 }
 
