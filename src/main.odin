@@ -58,6 +58,24 @@ main :: proc() {
 	create_swapchain()
 	defer destroy_swapchain()
 
+	command_pool: vk.CommandPool
+	command_pool_ci := vk.CommandPoolCreateInfo {
+		sType = .COMMAND_POOL_CREATE_INFO,
+		queueFamilyIndex = g.queue_family_index,
+		flags = {.TRANSIENT}
+	}
+	vk_check(vk.CreateCommandPool(g.device, &command_pool_ci, nil, &command_pool))
+	defer vk.DestroyCommandPool(g.device, command_pool, nil)
+
+	cmd: vk.CommandBuffer
+	command_buffer_ai := vk.CommandBufferAllocateInfo {
+		sType = .COMMAND_BUFFER_ALLOCATE_INFO,
+		commandPool = command_pool,
+		level = .PRIMARY,
+		commandBufferCount = 1,
+	}
+	vk_check(vk.AllocateCommandBuffers(g.device, &command_buffer_ai, &cmd))
+
 	acquire_semaphore: vk.Semaphore
 	semaphore_ci := vk.SemaphoreCreateInfo { sType = .SEMAPHORE_CREATE_INFO }
 	vk_check(vk.CreateSemaphore(g.device, &semaphore_ci, nil, &acquire_semaphore))
@@ -82,12 +100,26 @@ main :: proc() {
 
 		release_semaphore := g.swapchain.image_ready_semaphores[image_index]
 
+		vk_check(vk.ResetCommandPool(g.device, command_pool, {}))
+
+		begin_info := vk.CommandBufferBeginInfo {
+			sType = .COMMAND_BUFFER_BEGIN_INFO,
+			flags = {.ONE_TIME_SUBMIT},
+		}
+		vk_check(vk.BeginCommandBuffer(cmd, &begin_info))
+
+		// record GPU commands
+
+		vk_check(vk.EndCommandBuffer(cmd))
+
 		wait_stage_flags := vk.PipelineStageFlags { .COLOR_ATTACHMENT_OUTPUT }
 		submit_info := vk.SubmitInfo {
 			sType = .SUBMIT_INFO,
 			waitSemaphoreCount = 1,
 			pWaitSemaphores = &acquire_semaphore,
 			pWaitDstStageMask = &wait_stage_flags,
+			commandBufferCount = 1,
+			pCommandBuffers = &cmd,
 			signalSemaphoreCount = 1,
 			pSignalSemaphores = &release_semaphore,
 		}
