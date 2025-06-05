@@ -81,6 +81,7 @@ main :: proc() {
 	acquire_semaphore: vk.Semaphore
 	semaphore_ci := vk.SemaphoreCreateInfo { sType = .SEMAPHORE_CREATE_INFO }
 	vk_check(vk.CreateSemaphore(g.device, &semaphore_ci, nil, &acquire_semaphore))
+	defer vk.DestroySemaphore(g.device, acquire_semaphore, nil)
 
 	frame_fence: vk.Fence
 	fence_ci := vk.FenceCreateInfo {
@@ -88,6 +89,7 @@ main :: proc() {
 		flags = {.SIGNALED}
 	}
 	vk_check(vk.CreateFence(g.device, &fence_ci, nil, &frame_fence))
+	defer vk.DestroyFence(g.device, frame_fence, nil)
 
 	for !glfw.WindowShouldClose(g.window) {
 		free_all(context.temp_allocator)
@@ -109,6 +111,27 @@ main :: proc() {
 			flags = {.ONE_TIME_SUBMIT},
 		}
 		vk_check(vk.BeginCommandBuffer(cmd, &begin_info))
+
+		transition_to_color_attachment_barrier := vk.ImageMemoryBarrier2 {
+			sType = .IMAGE_MEMORY_BARRIER_2,
+			image = g.swapchain.images[image_index],
+			subresourceRange = {
+				aspectMask = {.COLOR},
+				levelCount = 1,
+				layerCount = 1,
+			},
+			oldLayout = .UNDEFINED,
+			newLayout = .COLOR_ATTACHMENT_OPTIMAL,
+			srcStageMask = {.ALL_COMMANDS},
+			srcAccessMask = {.MEMORY_READ},
+			dstStageMask = {.COLOR_ATTACHMENT_OUTPUT},
+			dstAccessMask = {.COLOR_ATTACHMENT_WRITE},
+		}
+		vk.CmdPipelineBarrier2(cmd, &vk.DependencyInfo {
+			sType = .DEPENDENCY_INFO,
+			imageMemoryBarrierCount = 1,
+			pImageMemoryBarriers = &transition_to_color_attachment_barrier,
+		})
 
 		color_attachment := vk.RenderingAttachmentInfo {
 			sType = .RENDERING_ATTACHMENT_INFO,
@@ -136,6 +159,27 @@ main :: proc() {
 
 		vk.CmdEndRendering(cmd)
 
+		transition_to_present_src_barrier := vk.ImageMemoryBarrier2 {
+			sType = .IMAGE_MEMORY_BARRIER_2,
+			image = g.swapchain.images[image_index],
+			subresourceRange = {
+				aspectMask = {.COLOR},
+				levelCount = 1,
+				layerCount = 1,
+			},
+			oldLayout = .COLOR_ATTACHMENT_OPTIMAL,
+			newLayout = .PRESENT_SRC_KHR,
+			srcStageMask = {.COLOR_ATTACHMENT_OUTPUT},
+			srcAccessMask = {.COLOR_ATTACHMENT_WRITE},
+			dstStageMask = {},
+			dstAccessMask = {},
+		}
+		vk.CmdPipelineBarrier2(cmd, &vk.DependencyInfo {
+			sType = .DEPENDENCY_INFO,
+			imageMemoryBarrierCount = 1,
+			pImageMemoryBarriers = &transition_to_present_src_barrier,
+		})
+
 		vk_check(vk.EndCommandBuffer(cmd))
 
 		wait_stage_flags := vk.PipelineStageFlags { .COLOR_ATTACHMENT_OUTPUT }
@@ -162,6 +206,8 @@ main :: proc() {
 		// TODO: handle SUBOPTIMAL_KHR and ERROR_OUT_OF_DATE_KHR
 		vk_check(vk.QueuePresentKHR(g.queue, &present_info))
 	}
+
+	vk_check(vk.DeviceWaitIdle(g.device))
 }
 
 create_instance :: proc() {
@@ -265,6 +311,7 @@ create_device :: proc() {
 		sType = .PHYSICAL_DEVICE_VULKAN_1_3_FEATURES,
 		pNext = next,
 		dynamicRendering = true,
+		synchronization2 = true,
 	}
 
 	device_ci := vk.DeviceCreateInfo {
