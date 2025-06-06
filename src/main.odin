@@ -6,12 +6,22 @@ import "core:slice"
 import "vendor:glfw"
 import vk "vendor:vulkan"
 
+NUM_FRAMES_IN_FLIGHT :: 2
+NUM_SWAPCHAIN_IMAGES :: 3
+
+Per_Frame_Data :: struct {
+	fence: vk.Fence,
+	acquire_semaphore: vk.Semaphore,
+	command_pool: vk.CommandPool,
+	command_buffer: vk.CommandBuffer,
+}
+
 Swapchain :: struct {
 	handle: vk.SwapchainKHR,
 	width, height: u32,
 	images: []vk.Image,
 	image_views: []vk.ImageView,
-	image_ready_semaphores: []vk.Semaphore,
+	present_semaphores: []vk.Semaphore,
 }
 
 Globals :: struct {
@@ -25,6 +35,8 @@ Globals :: struct {
 	device: vk.Device,
 	queue: vk.Queue,
 	swapchain: Swapchain,
+	per_frame: [NUM_FRAMES_IN_FLIGHT]Per_Frame_Data,
+	frame_index: u8,
 }
 g: Globals
 
@@ -60,51 +72,27 @@ main :: proc() {
 	create_swapchain()
 	defer destroy_swapchain()
 
-	command_pool: vk.CommandPool
-	command_pool_ci := vk.CommandPoolCreateInfo {
-		sType = .COMMAND_POOL_CREATE_INFO,
-		queueFamilyIndex = g.queue_family_index,
-		flags = {.TRANSIENT}
-	}
-	vk_check(vk.CreateCommandPool(g.device, &command_pool_ci, nil, &command_pool))
-	defer vk.DestroyCommandPool(g.device, command_pool, nil)
-
-	cmd: vk.CommandBuffer
-	command_buffer_ai := vk.CommandBufferAllocateInfo {
-		sType = .COMMAND_BUFFER_ALLOCATE_INFO,
-		commandPool = command_pool,
-		level = .PRIMARY,
-		commandBufferCount = 1,
-	}
-	vk_check(vk.AllocateCommandBuffers(g.device, &command_buffer_ai, &cmd))
-
-	acquire_semaphore: vk.Semaphore
-	semaphore_ci := vk.SemaphoreCreateInfo { sType = .SEMAPHORE_CREATE_INFO }
-	vk_check(vk.CreateSemaphore(g.device, &semaphore_ci, nil, &acquire_semaphore))
-	defer vk.DestroySemaphore(g.device, acquire_semaphore, nil)
-
-	frame_fence: vk.Fence
-	fence_ci := vk.FenceCreateInfo {
-		sType = .FENCE_CREATE_INFO,
-		flags = {.SIGNALED}
-	}
-	vk_check(vk.CreateFence(g.device, &fence_ci, nil, &frame_fence))
-	defer vk.DestroyFence(g.device, frame_fence, nil)
+	create_frames()
+	defer destroy_frames()
 
 	for !glfw.WindowShouldClose(g.window) {
 		free_all(context.temp_allocator)
 		glfw.PollEvents()
 
-		vk_check(vk.WaitForFences(g.device, 1, &frame_fence, true, max(u64)))
-		vk_check(vk.ResetFences(g.device, 1, &frame_fence))
+		frame := g.per_frame[g.frame_index]
+
+		vk_check(vk.WaitForFences(g.device, 1, &frame.fence, true, max(u64)))
+		vk_check(vk.ResetFences(g.device, 1, &frame.fence))
 
 		image_index: u32
 		// TODO: handle SUBOPTIMAL_KHR and ERROR_OUT_OF_DATE_KHR
-		vk_check(vk.AcquireNextImageKHR(g.device, g.swapchain.handle, max(u64), acquire_semaphore, 0, &image_index))
+		vk_check(vk.AcquireNextImageKHR(g.device, g.swapchain.handle, max(u64), frame.acquire_semaphore, 0, &image_index))
 
-		release_semaphore := g.swapchain.image_ready_semaphores[image_index]
+		present_semaphore := g.swapchain.present_semaphores[image_index]
 
-		vk_check(vk.ResetCommandPool(g.device, command_pool, {}))
+		vk_check(vk.ResetCommandPool(g.device, frame.command_pool, {}))
+
+		cmd := frame.command_buffer
 
 		begin_info := vk.CommandBufferBeginInfo {
 			sType = .COMMAND_BUFFER_BEGIN_INFO,
@@ -186,25 +174,27 @@ main :: proc() {
 		submit_info := vk.SubmitInfo {
 			sType = .SUBMIT_INFO,
 			waitSemaphoreCount = 1,
-			pWaitSemaphores = &acquire_semaphore,
+			pWaitSemaphores = &frame.acquire_semaphore,
 			pWaitDstStageMask = &wait_stage_flags,
 			commandBufferCount = 1,
 			pCommandBuffers = &cmd,
 			signalSemaphoreCount = 1,
-			pSignalSemaphores = &release_semaphore,
+			pSignalSemaphores = &present_semaphore,
 		}
-		vk_check(vk.QueueSubmit(g.queue, 1, &submit_info, frame_fence))
+		vk_check(vk.QueueSubmit(g.queue, 1, &submit_info, frame.fence))
 
 		present_info := vk.PresentInfoKHR {
 			sType = .PRESENT_INFO_KHR,
 			waitSemaphoreCount = 1,
-			pWaitSemaphores = &release_semaphore,
+			pWaitSemaphores = &present_semaphore,
 			swapchainCount = 1,
 			pSwapchains = &g.swapchain.handle,
 			pImageIndices = &image_index,
 		}
 		// TODO: handle SUBOPTIMAL_KHR and ERROR_OUT_OF_DATE_KHR
 		vk_check(vk.QueuePresentKHR(g.queue, &present_info))
+
+		g.frame_index = (g.frame_index + 1) % NUM_FRAMES_IN_FLIGHT
 	}
 
 	vk_check(vk.DeviceWaitIdle(g.device))
@@ -338,7 +328,7 @@ create_swapchain :: proc() {
 	surface_caps: vk.SurfaceCapabilitiesKHR
 	vk_check(vk.GetPhysicalDeviceSurfaceCapabilitiesKHR(g.physical_device, g.surface, &surface_caps))
 
-	image_count: u32 = max(3, surface_caps.minImageCount)
+	image_count: u32 = max(NUM_SWAPCHAIN_IMAGES, surface_caps.minImageCount)
 	if surface_caps.maxImageCount != 0 do image_count = min(image_count, surface_caps.maxImageCount)
 
 	surface_format_count: u32
@@ -406,21 +396,57 @@ create_swapchain :: proc() {
 		vk_check(vk.CreateImageView(g.device, &image_ci, nil, &g.swapchain.image_views[i]))
 	}
 
-	g.swapchain.image_ready_semaphores = make([]vk.Semaphore, image_count, context.allocator)
+	g.swapchain.present_semaphores = make([]vk.Semaphore, image_count, context.allocator)
 
 	semaphore_ci := vk.SemaphoreCreateInfo { sType = .SEMAPHORE_CREATE_INFO }
-	for &semaphore in g.swapchain.image_ready_semaphores {
+	for &semaphore in g.swapchain.present_semaphores {
 		vk_check(vk.CreateSemaphore(g.device, &semaphore_ci, nil, &semaphore))
 	}
 }
 
 destroy_swapchain :: proc() {
 	delete(g.swapchain.images)
-	for semaphore in g.swapchain.image_ready_semaphores do vk.DestroySemaphore(g.device, semaphore, nil)
-	delete(g.swapchain.image_ready_semaphores)
+	for semaphore in g.swapchain.present_semaphores do vk.DestroySemaphore(g.device, semaphore, nil)
+	delete(g.swapchain.present_semaphores)
 	for image_view in g.swapchain.image_views do vk.DestroyImageView(g.device, image_view, nil)
 	delete(g.swapchain.image_views)
 	vk.DestroySwapchainKHR(g.device, g.swapchain.handle, nil)
+}
+
+create_frames :: proc() {
+	for &frame in g.per_frame {
+		command_pool_ci := vk.CommandPoolCreateInfo {
+			sType = .COMMAND_POOL_CREATE_INFO,
+			queueFamilyIndex = g.queue_family_index,
+			flags = {.TRANSIENT}
+		}
+		vk_check(vk.CreateCommandPool(g.device, &command_pool_ci, nil, &frame.command_pool))
+
+		command_buffer_ai := vk.CommandBufferAllocateInfo {
+			sType = .COMMAND_BUFFER_ALLOCATE_INFO,
+			commandPool = frame.command_pool,
+			level = .PRIMARY,
+			commandBufferCount = 1,
+		}
+		vk_check(vk.AllocateCommandBuffers(g.device, &command_buffer_ai, &frame.command_buffer))
+
+		semaphore_ci := vk.SemaphoreCreateInfo { sType = .SEMAPHORE_CREATE_INFO }
+		vk_check(vk.CreateSemaphore(g.device, &semaphore_ci, nil, &frame.acquire_semaphore))
+
+		fence_ci := vk.FenceCreateInfo {
+			sType = .FENCE_CREATE_INFO,
+			flags = {.SIGNALED}
+		}
+		vk_check(vk.CreateFence(g.device, &fence_ci, nil, &frame.fence))
+	}
+}
+
+destroy_frames :: proc() {
+	for frame in g.per_frame {
+		vk.DestroyCommandPool(g.device, frame.command_pool, nil)
+		vk.DestroySemaphore(g.device, frame.acquire_semaphore, nil)
+		vk.DestroyFence(g.device, frame.fence, nil)
+	}
 }
 
 vk_check :: proc(result: vk.Result, location := #caller_location) {
