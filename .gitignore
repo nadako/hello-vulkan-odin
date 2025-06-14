@@ -1,3 +1,4 @@
 /hello-vulkan.exe
 /hello-vulkan.pdb
 /Session.vim
+/shaders/*.spv

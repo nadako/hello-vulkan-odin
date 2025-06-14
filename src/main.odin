@@ -3,6 +3,7 @@ package main
 import "base:runtime"
 import "core:log"
 import "core:slice"
+import "core:os"
 import "vendor:glfw"
 import vk "vendor:vulkan"
 
@@ -37,6 +38,8 @@ Globals :: struct {
 	swapchain: Swapchain,
 	per_frame: [NUM_FRAMES_IN_FLIGHT]Per_Frame_Data,
 	frame_index: u8,
+
+	shaders: [2]vk.ShaderEXT,
 }
 g: Globals
 
@@ -74,6 +77,9 @@ main :: proc() {
 
 	create_frames()
 	defer destroy_frames()
+
+	create_shaders()
+	defer destroy_shaders()
 
 	for !glfw.WindowShouldClose(g.window) {
 		free_all(context.temp_allocator)
@@ -143,7 +149,7 @@ main :: proc() {
 		}
 		vk.CmdBeginRendering(cmd, &rendering_info)
 
-		// draw stuff
+		render(cmd)
 
 		vk.CmdEndRendering(cmd)
 
@@ -200,9 +206,53 @@ main :: proc() {
 	vk_check(vk.DeviceWaitIdle(g.device))
 }
 
+render :: proc(cmd: vk.CommandBuffer) {
+	shader_stages := [2]vk.ShaderStageFlags { {.VERTEX}, {.FRAGMENT} }
+	vk.CmdBindShadersEXT(cmd, 2, raw_data(&shader_stages), raw_data(&g.shaders))
+
+	vk.CmdSetViewportWithCount(cmd, 1, &vk.Viewport {
+		width = f32(g.swapchain.width),
+		height = f32(g.swapchain.height),
+		minDepth = 0,
+		maxDepth = 1,
+	})
+	vk.CmdSetScissorWithCount(cmd, 1, &vk.Rect2D {
+		extent = {width = g.swapchain.width, height = g.swapchain.height}
+	})
+	vk.CmdSetRasterizerDiscardEnable(cmd, false)
+
+	vk.CmdSetVertexInputEXT(cmd, 0, nil, 0, nil)
+	vk.CmdSetPrimitiveTopology(cmd, .TRIANGLE_LIST)
+	vk.CmdSetPrimitiveRestartEnable(cmd, false)
+
+	vk.CmdSetRasterizationSamplesEXT(cmd, {._1})
+	sample_mask := vk.SampleMask(1)
+	vk.CmdSetSampleMaskEXT(cmd, {._1}, &sample_mask)
+	vk.CmdSetAlphaToCoverageEnableEXT(cmd, false)
+
+	vk.CmdSetPolygonModeEXT(cmd, .FILL)
+	vk.CmdSetCullMode(cmd, {})
+	vk.CmdSetFrontFace(cmd, .COUNTER_CLOCKWISE)
+
+	vk.CmdSetDepthTestEnable(cmd, false)
+	vk.CmdSetDepthWriteEnable(cmd, false)
+	vk.CmdSetDepthBiasEnable(cmd, false)
+
+	vk.CmdSetStencilTestEnable(cmd, false)
+
+	b32_false := b32(false)
+	vk.CmdSetColorBlendEnableEXT(cmd, 0, 1, &b32_false)
+
+	color_mask := vk.ColorComponentFlags { .R, .G, .B, .A }
+	vk.CmdSetColorWriteMaskEXT(cmd, 0, 1, &color_mask)
+
+	vk.CmdDraw(cmd, 3, 1, 0, 0)
+}
+
 create_instance :: proc() {
 	layers := []cstring {
-		"VK_LAYER_KHRONOS_validation"
+		"VK_LAYER_KHRONOS_validation",
+		"VK_LAYER_KHRONOS_shader_object",
 	}
 	extensions := slice.concatenate([][]cstring {
 		glfw.GetRequiredInstanceExtensions(),
@@ -293,6 +343,7 @@ create_device :: proc() {
 
 	extensions := []cstring {
 		vk.KHR_SWAPCHAIN_EXTENSION_NAME,
+		vk.EXT_SHADER_OBJECT_EXTENSION_NAME,
 	}
 
 	next: rawptr
@@ -302,6 +353,12 @@ create_device :: proc() {
 		pNext = next,
 		dynamicRendering = true,
 		synchronization2 = true,
+	}
+
+	next = &vk.PhysicalDeviceShaderObjectFeaturesEXT {
+		sType = .PHYSICAL_DEVICE_SHADER_OBJECT_FEATURES_EXT,
+		pNext = next,
+		shaderObject = true,
 	}
 
 	device_ci := vk.DeviceCreateInfo {
@@ -447,6 +504,43 @@ destroy_frames :: proc() {
 		vk.DestroySemaphore(g.device, frame.acquire_semaphore, nil)
 		vk.DestroyFence(g.device, frame.fence, nil)
 	}
+}
+
+load_file :: proc(filename: string, allocator: runtime.Allocator) -> []byte {
+	data, ok := os.read_entire_file_from_filename(filename, allocator)
+	log.assertf(ok, "Could not load file {}", filename)
+	return data
+}
+
+create_shaders :: proc() {
+	vert_code := load_file("shaders/shader.vert.spv", context.temp_allocator)
+	frag_code := load_file("shaders/shader.frag.spv", context.temp_allocator)
+	shader_cis := [2]vk.ShaderCreateInfoEXT {
+		{
+			sType = .SHADER_CREATE_INFO_EXT,
+			codeType = .SPIRV,
+			codeSize = len(vert_code),
+			pCode = raw_data(vert_code),
+			pName = "main",
+			stage = {.VERTEX},
+			nextStage = {.FRAGMENT},
+			flags = {.LINK_STAGE},
+		},
+		{
+			sType = .SHADER_CREATE_INFO_EXT,
+			codeType = .SPIRV,
+			codeSize = len(frag_code),
+			pCode = raw_data(frag_code),
+			pName = "main",
+			stage = {.FRAGMENT},
+			flags = {.LINK_STAGE},
+		},
+	}
+	vk_check(vk.CreateShadersEXT(g.device, 2, raw_data(&shader_cis), nil, raw_data(&g.shaders)))
+}
+
+destroy_shaders :: proc() {
+	for shader in g.shaders do vk.DestroyShaderEXT(g.device, shader, nil)
 }
 
 vk_check :: proc(result: vk.Result, location := #caller_location) {
