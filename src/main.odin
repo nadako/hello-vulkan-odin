@@ -40,6 +40,7 @@ Globals :: struct {
 	frame_index: u8,
 
 	shaders: [2]vk.ShaderEXT,
+	pipeline_layout: vk.PipelineLayout,
 }
 g: Globals
 
@@ -245,6 +246,12 @@ render :: proc(cmd: vk.CommandBuffer) {
 
 	color_mask := vk.ColorComponentFlags { .R, .G, .B, .A }
 	vk.CmdSetColorWriteMaskEXT(cmd, 0, 1, &color_mask)
+
+	Push :: struct {
+		color: [3]f32,
+	}
+	push := Push { color = { 0, 0.5, 0 } }
+	vk.CmdPushConstants(cmd, g.pipeline_layout, {.VERTEX, .FRAGMENT}, 0, size_of(push), &push)
 
 	vk.CmdDraw(cmd, 3, 1, 0, 0)
 }
@@ -513,6 +520,19 @@ load_file :: proc(filename: string, allocator: runtime.Allocator) -> []byte {
 }
 
 create_shaders :: proc() {
+	push_constant_ranges := []vk.PushConstantRange {
+		{
+			stageFlags = {.VERTEX, .FRAGMENT},
+			size = 128,
+		}
+	}
+	pipeline_layout_ci := vk.PipelineLayoutCreateInfo {
+		sType = .PIPELINE_LAYOUT_CREATE_INFO,
+		pushConstantRangeCount = u32(len(push_constant_ranges)),
+		pPushConstantRanges = raw_data(push_constant_ranges),
+	}
+	vk_check(vk.CreatePipelineLayout(g.device, &pipeline_layout_ci, nil, &g.pipeline_layout))
+
 	vert_code := load_file("shaders/shader.vert.spv", context.temp_allocator)
 	frag_code := load_file("shaders/shader.frag.spv", context.temp_allocator)
 	shader_cis := [2]vk.ShaderCreateInfoEXT {
@@ -525,6 +545,8 @@ create_shaders :: proc() {
 			stage = {.VERTEX},
 			nextStage = {.FRAGMENT},
 			flags = {.LINK_STAGE},
+			pushConstantRangeCount = u32(len(push_constant_ranges)),
+			pPushConstantRanges = raw_data(push_constant_ranges),
 		},
 		{
 			sType = .SHADER_CREATE_INFO_EXT,
@@ -534,12 +556,15 @@ create_shaders :: proc() {
 			pName = "main",
 			stage = {.FRAGMENT},
 			flags = {.LINK_STAGE},
+			pushConstantRangeCount = u32(len(push_constant_ranges)),
+			pPushConstantRanges = raw_data(push_constant_ranges),
 		},
 	}
 	vk_check(vk.CreateShadersEXT(g.device, 2, raw_data(&shader_cis), nil, raw_data(&g.shaders)))
 }
 
 destroy_shaders :: proc() {
+	vk.DestroyPipelineLayout(g.device, g.pipeline_layout, nil)
 	for shader in g.shaders do vk.DestroyShaderEXT(g.device, shader, nil)
 }
 
